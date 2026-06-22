@@ -402,7 +402,7 @@ app.get('/prices', async (req, res) => {
       id: p.id,
       name: p.name || '',
       brand: p.brand || '',
-      price: p.sizes?.[0]?.price?.total ? Math.round(p.sizes[0].price.total / 100) : (p.salePriceU ? Math.round(p.salePriceU / 100) : 0),
+      price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : (p.sizes?.[0]?.price?.basic ? Math.round(p.sizes[0].price.basic / 100) : 0),
       rating: p.reviewRating || 0,
       feedbacks: p.feedbacks || 0,
     }));
