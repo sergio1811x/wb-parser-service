@@ -382,26 +382,20 @@ async function processJob(job) {
   const product = await fetchProduct(job.input_url);
   console.log(`[job] Product: ${product.titleCn?.slice(0, 30)}`);
 
-  // 2. Parallel: AI + WB + Economics
-  const [seoContent, wbData, yuanToRub] = await Promise.all([
-    generateSeo(product),
-    searchWb(product.mainImageUrl),
-    getYuanRate(),
-  ]);
-
-  const economics = calcEconomics(product.priceYuan, product.weightKg, wbData?.avgPrice, yuanToRub);
-  const verdict = buildVerdict(economics, wbData, product.sold);
+  // 2. WB поиск по фото (только это на VPS)
+  const wbData = await searchWb(product.mainImageUrl);
 
   const durationMs = Date.now() - startTime;
   console.log(`[job] Done in ${durationMs}ms`);
 
-  // Только данные для Telegram-сообщений, без тяжёлого контента
+  // Только сырые данные — AI, экономика, ZIP делаются на Vercel
   return {
-    product: {
+    rawProduct: {
       productId: product.productId,
       platform: product.platform,
       titleCn: product.titleCn,
-      titleRu: seoContent.titleRu,
+      titleEn: product.titleEn,
+      description: product.description?.slice(0, 500),
       priceYuan: product.priceYuan,
       priceRange: product.priceRange?.slice(0, 3),
       moq: product.moq,
@@ -411,12 +405,11 @@ async function processJob(job) {
       supplierType: product.supplierType,
       sold: product.sold,
       stock: product.stock,
-      seoContent,
-      wbData,
-      economics,
-      verdict,
+      categoryName: product.categoryName,
+      attributes: product.attributes?.slice(0, 15),
     },
     imageUrls: product.images,
+    wbData,
     durationMs,
   };
 }
