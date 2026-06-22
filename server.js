@@ -112,14 +112,29 @@ app.get('/search-by-image', async (req, res) => {
     fs.writeFileSync(tmpPath, imgBuffer);
     await uploadInput.setInputFiles(tmpPath);
 
+    console.log('[wb-img] Waiting for crop modal...');
+
+    // После загрузки фото WB показывает модалку "Выберите область с товаром"
+    // Нужно нажать "Найти товар"
+    try {
+      const findBtn = await page.waitForSelector(
+        'button#searchGoodsButton, button[aria-label="Найти товар"], .popup-crop-search-image__button',
+        { timeout: 10000 }
+      );
+      console.log('[wb-img] Found "Найти товар" button, clicking...');
+      await findBtn.click();
+    } catch {
+      console.log('[wb-img] No crop modal / find button');
+    }
+
     console.log('[wb-img] Waiting for results...');
 
-    // Ждём результаты
+    // Ждём результаты поиска
     try {
       await page.waitForSelector('.product-card, [data-nm-id], .j-card-item', { timeout: 20000 });
       console.log('[wb-img] Cards found!');
     } catch {
-      console.log('[wb-img] No cards after image upload');
+      console.log('[wb-img] No cards after image search');
     }
 
     await page.waitForTimeout(3000);
