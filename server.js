@@ -47,8 +47,23 @@ async function getWarmPage() {
   return warmPage;
 }
 
-// Прогреваем при старте
+// Прогреваем при старте и обновляем каждые 30 мин
 setTimeout(() => getWarmPage().catch(e => console.error('[warm] Failed:', e.message)), 2000);
+setInterval(async () => {
+  console.log('[warm] Refreshing cookies...');
+  try {
+    if (warmPage && !warmPage.isClosed()) {
+      await warmPage.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      console.log('[warm] Cookies refreshed');
+    } else {
+      warmPage = null;
+      await getWarmPage();
+    }
+  } catch (e) {
+    console.error('[warm] Refresh failed:', e.message);
+    warmPage = null;
+  }
+}, 30 * 60 * 1000);
 
 // ─── Поиск по фото ──────────────────────────────────────────────────────────
 
