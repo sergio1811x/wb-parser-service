@@ -37,10 +37,13 @@ app.get('/search-by-image', async (req, res) => {
   let context = null;
   try {
     const br = await getBrowser();
+    // Мобильный viewport — WB сразу показывает загрузку фото без drag-and-drop
     context = await br.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
       locale: 'ru-RU',
-      viewport: { width: 1920, height: 1080 },
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
     });
 
     const page = await context.newPage();
@@ -66,59 +69,67 @@ app.get('/search-by-image', async (req, res) => {
       } catch {}
     });
 
-    // Открываем WB
-    console.log('[wb-img] Opening WB...');
+    // Открываем мобильную версию WB
+    console.log('[wb-img] Opening mobile WB...');
     await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
 
-    // Загружаем фото напрямую через file input (без клика на камеру)
-    // WB форма: #searchByImageForm > label#searchByImageFormAbOld > input[type=file]
-    console.log('[wb-img] Looking for file input...');
+    const pageTitle = await page.title();
+    console.log(`[wb-img] Page title: "${pageTitle}"`);
 
-    // Ищем input[type=file] в форме поиска по фото
-    const fileInput = await page.$('#searchByImageForm input[type="file"], #searchByImageContainer input[type="file"], input[accept*="image"]')
-      || await page.$('input[type="file"]');
+    // На мобильном ищем кнопку камеры и file input
+    console.log('[wb-img] Looking for camera / file input...');
 
-    if (!fileInput) {
-      console.log('[wb-img] No file input found on page');
-      // Попробуем кликнуть на label чтобы раскрыть форму
-      const label = await page.$('label#searchByImageFormAbOld, label[data-wba-header-name="Search_photo"], .search-catalog__photo label');
-      if (label) {
-        console.log('[wb-img] Found label, clicking...');
-        await label.click();
-        await page.waitForTimeout(2000);
-      }
+    // Сначала ищем file input напрямую (может быть скрытый)
+    let uploadInput = await page.$('input[type="file"]')
+      || await page.$('input[accept*="image"]');
+
+    // Если нет — кликаем на иконку камеры чтобы появился
+    if (!uploadInput) {
+      console.log('[wb-img] No file input, clicking camera icon...');
+      const cameraClicked = await page.evaluate(() => {
+        // Ищем SVG иконку камеры или элемент с data-wba-header-name="Search_photo"
+        const el = document.querySelector('[data-wba-header-name="Search_photo"], label[for*="image"], .search-catalog__photo');
+        if (el) { el.click(); return true; }
+        // Fallback: ищем маленькую кнопку рядом с поиском
+        const search = document.querySelector('input[type="search"], input[name="search"], #searchInput');
+        if (!search) return false;
+        const sr = search.getBoundingClientRect();
+        const btns = document.querySelectorAll('button, label, [role="button"]');
+        for (const b of btns) {
+          const r = b.getBoundingClientRect();
+          if (r.x > sr.right - 50 && Math.abs(r.y - sr.y) < 20 && r.width < 60) {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      console.log(`[wb-img] Camera click: ${cameraClicked}`);
+      await page.waitForTimeout(2000);
+      uploadInput = await page.$('input[type="file"]') || await page.$('input[accept*="image"]');
     }
 
-    await page.waitForTimeout(1500);
-
-    // Находим file input (может быть скрытый)
-    console.log('[wb-img] Uploading image...');
-    const uploadInput = fileInput
-      || await page.$('#searchByImageForm input[type="file"]')
-      || await page.$('#searchByImageContainer input[type="file"]')
-      || await page.$('input[accept*="image"]')
-      || await page.$('input[type="file"]');
-
     if (!uploadInput) {
-      console.log('[wb-img] File input not found anywhere');
+      console.log('[wb-img] File input not found');
       await context.close();
       return res.json({ success: false, error: 'File input not found', fallback: true });
     }
 
-    // Сохраняем буфер и загружаем
+    // Загружаем фото
     const fs = require('fs');
     const tmpPath = '/tmp/wb_search_img.jpg';
     fs.writeFileSync(tmpPath, imgBuffer);
+    console.log('[wb-img] Uploading image...');
     await uploadInput.setInputFiles(tmpPath);
 
-    console.log('[wb-img] Waiting for crop modal...');
+    await page.waitForTimeout(3000);
 
-    // После загрузки фото WB показывает модалку "Выберите область с товаром"
-    // Нужно нажать "Найти товар"
+    // На мобильном: после загрузки появляется кнопка "Найти товар"
+    console.log('[wb-img] Looking for "Найти товар" button...');
     try {
       const findBtn = await page.waitForSelector(
-        'button#searchGoodsButton, button[aria-label="Найти товар"], .popup-crop-search-image__button',
+        'button#searchGoodsButton, button[aria-label="Найти товар"], .popup-crop-search-image__button, button.btn-main',
         { timeout: 10000 }
       );
       console.log('[wb-img] Found "Найти товар" button, clicking...');
