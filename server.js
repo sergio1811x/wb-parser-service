@@ -71,36 +71,79 @@ app.get('/search-by-image', async (req, res) => {
     await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
 
-    // Ищем кнопку поиска по фото
+    // Ищем кнопку поиска по фото — пробуем множество селекторов
     console.log('[wb-img] Looking for image search button...');
-    const cameraBtn = await page.waitForSelector(
-      'button[class*="search-catalog__btn--photo"], button[aria-label*="фото"], [class*="photo-search"], [class*="camera"], button.search-catalog__btn--photo',
-      { timeout: 10000 }
-    ).catch(() => null);
 
-    if (!cameraBtn) {
-      // Пробуем найти по иконке камеры
-      const btns = await page.$$('button');
-      let found = null;
-      for (const btn of btns) {
-        const html = await btn.innerHTML();
-        if (html.includes('camera') || html.includes('photo') || html.includes('svg')) {
-          const rect = await btn.boundingBox();
-          // Кнопка камеры обычно рядом с поиском, справа
-          if (rect && rect.x > 500 && rect.width < 60) {
-            found = btn;
-            break;
+    // Дебаг: что вообще есть в зоне поиска
+    const searchAreaInfo = await page.evaluate(() => {
+      const searchForm = document.querySelector('.search-catalog, [class*="search"], header');
+      if (!searchForm) return 'no search area found';
+      const buttons = searchForm.querySelectorAll('button, a, [role="button"]');
+      return Array.from(buttons).map(b => ({
+        tag: b.tagName,
+        class: b.className?.slice?.(0, 80),
+        text: b.textContent?.trim()?.slice(0, 30),
+        ariaLabel: b.getAttribute('aria-label'),
+        title: b.getAttribute('title'),
+        rect: b.getBoundingClientRect ? { x: Math.round(b.getBoundingClientRect().x), y: Math.round(b.getBoundingClientRect().y), w: Math.round(b.getBoundingClientRect().width) } : null,
+      }));
+    });
+    console.log('[wb-img] Search area buttons:', JSON.stringify(searchAreaInfo).slice(0, 1000));
+
+    let cameraClicked = false;
+
+    // Способ 1: прямой селектор
+    const selectors = [
+      'button.search-catalog__btn--photo',
+      '[class*="search"] button[class*="photo"]',
+      '[class*="search"] button svg',
+      'button[aria-label*="фото"]',
+      'button[aria-label*="фото"]',
+      'button[title*="фото"]',
+      '.search-catalog__btn--photo',
+    ];
+
+    for (const sel of selectors) {
+      try {
+        const el = await page.$(sel);
+        if (el) {
+          await el.click();
+          cameraClicked = true;
+          console.log(`[wb-img] Clicked via selector: ${sel}`);
+          break;
+        }
+      } catch {}
+    }
+
+    // Способ 2: ищем кнопку с SVG рядом с поиском (иконка камеры)
+    if (!cameraClicked) {
+      const clicked = await page.evaluate(() => {
+        const searchBar = document.querySelector('#searchInput, input[name="search"], .search-catalog__input');
+        if (!searchBar) return false;
+        const searchRect = searchBar.getBoundingClientRect();
+        // Ищем кликабельный элемент справа от поиска
+        const allClickable = document.querySelectorAll('button, [role="button"], a');
+        for (const el of allClickable) {
+          const r = el.getBoundingClientRect();
+          // Кнопка должна быть: справа от поиска, на той же высоте, маленькая
+          if (r.x > searchRect.right - 60 && r.x < searchRect.right + 100
+              && Math.abs(r.y - searchRect.y) < 30 && r.width < 70 && r.width > 10) {
+            el.click();
+            return true;
           }
         }
+        return false;
+      });
+      if (clicked) {
+        cameraClicked = true;
+        console.log('[wb-img] Clicked via position detection');
       }
-      if (!found) {
-        console.log('[wb-img] Camera button not found, falling back to text search');
-        await context.close();
-        return res.json({ success: false, error: 'Camera button not found', fallback: true });
-      }
-      await found.click();
-    } else {
-      await cameraBtn.click();
+    }
+
+    if (!cameraClicked) {
+      console.log('[wb-img] Camera button not found');
+      await context.close();
+      return res.json({ success: false, error: 'Camera button not found', fallback: true });
     }
 
     await page.waitForTimeout(1500);
