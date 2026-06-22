@@ -13,7 +13,7 @@ let browser = null;
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
     browser = await chromium.launch({
-      headless: false, // Настоящий браузер, не headless-shell
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -49,7 +49,6 @@ app.get('/search', async (req, res) => {
 
     const page = await context.newPage();
 
-    // Перехватываем API-ответы WB
     const apiResponses = [];
     page.on('response', async (response) => {
       try {
@@ -63,22 +62,40 @@ app.get('/search', async (req, res) => {
       } catch {}
     });
 
-    // Сначала главная для cookies
-    await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
-
-    // Поиск
+    // Заходим сразу на поиск, ждём загрузки
     const searchUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(query)}`;
     console.log(`[wb] Searching: ${query}`);
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 45000 });
+
+    await page.goto(searchUrl, { waitUntil: 'load', timeout: 45000 });
+
+    // Ждём пока страница стабилизируется (возможны редиректы)
+    await page.waitForTimeout(5000);
+
+    // Если нас редиректнули на главную — ищем через поисковую строку
+    const currentUrl = page.url();
+    console.log(`[wb] Current URL: ${currentUrl}`);
+
+    if (!currentUrl.includes('search')) {
+      console.log('[wb] Redirected, using search bar...');
+      try {
+        // Ищем поле поиска и вводим запрос
+        const searchInput = await page.waitForSelector('#searchInput, input[name="search"], .search-catalog__input', { timeout: 5000 });
+        await searchInput.click();
+        await searchInput.fill(query);
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(5000);
+        console.log(`[wb] After search: ${page.url()}`);
+      } catch (e) {
+        console.log(`[wb] Search bar not found: ${e.message}`);
+      }
+    }
 
     // Ждём карточки
     try {
       await page.waitForSelector('.product-card, [data-nm-id], .j-card-item', { timeout: 15000 });
-      console.log('[wb] Cards found');
+      console.log('[wb] Cards found!');
     } catch {
-      console.log('[wb] No cards, waiting...');
-      await page.waitForTimeout(5000);
+      console.log('[wb] No cards found');
     }
 
     await page.waitForTimeout(2000);
@@ -136,12 +153,7 @@ app.get('/search', async (req, res) => {
       feedbacks: p.feedbacks || 0,
     }));
 
-    res.json({
-      success: products.length > 0,
-      total,
-      count: slim.length,
-      products: slim,
-    });
+    res.json({ success: products.length > 0, total, count: slim.length, products: slim });
 
   } catch (e) {
     console.error('[wb-parser] Error:', e.message);
