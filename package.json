@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "worker": "node worker.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.0",
+    "adm-zip": "^0.5.16",
     "express": "^4.21.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
