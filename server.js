@@ -43,15 +43,23 @@ app.get('/search', async (req, res) => {
 
     const page = await context.newPage();
 
-    // Собираем все API-ответы от WB
+    // Собираем все API-ответы
     const apiResponses = [];
+    const allUrls = [];
     page.on('response', async (response) => {
       try {
         const url = response.url();
-        if (url.includes('search.wb.ru') || url.includes('catalog.wb.ru')) {
-          const text = await response.text();
-          if (text.includes('"products"')) {
-            apiResponses.push(text);
+        if (url.includes('.wb.ru')) {
+          allUrls.push(url.slice(0, 120));
+        }
+        if ((url.includes('search.wb.ru') || url.includes('catalog.wb.ru') || url.includes('card.wb.ru')) && response.status() === 200) {
+          const ct = response.headers()['content-type'] || '';
+          if (ct.includes('json') || ct.includes('text')) {
+            const text = await response.text();
+            apiResponses.push({ url: url.slice(0, 150), len: text.length, snippet: text.slice(0, 200) });
+            if (text.includes('"products"')) {
+              apiResponses.push({ url, full: text });
+            }
           }
         }
       } catch {}
@@ -60,75 +68,82 @@ app.get('/search', async (req, res) => {
     const searchUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(query)}`;
     console.log(`[wb] Opening: ${searchUrl}`);
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 45000 });
 
-    // Ждём появления товаров на странице
+    // Ждём карточки
+    let hasCards = false;
     try {
-      await page.waitForSelector('[class*="product-card"], [class*="ProductCard"], [data-nm-id]', { timeout: 15000 });
-      console.log('[wb] Product cards found on page');
+      await page.waitForSelector('.product-card, .product-card-list, [data-nm-id], .j-card-item', { timeout: 10000 });
+      hasCards = true;
+      console.log('[wb] Cards found');
     } catch {
-      console.log('[wb] No product cards found, waiting extra...');
-      await page.waitForTimeout(5000);
+      console.log('[wb] No cards selector found');
     }
 
-    // Даём время на догрузку API-ответов
     await page.waitForTimeout(2000);
+
+    const finalUrl = page.url();
+    const title = await page.title();
+    const bodyLen = await page.evaluate(() => document.body.innerText.length);
+
+    console.log(`[wb] Final URL: ${finalUrl}`);
+    console.log(`[wb] Title: ${title}`);
+    console.log(`[wb] Body text length: ${bodyLen}`);
+    console.log(`[wb] WB URLs seen: ${allUrls.length}`);
+    console.log(`[wb] API responses: ${apiResponses.length}`);
+    apiResponses.forEach((r, i) => {
+      if (!r.full) console.log(`[wb] resp[${i}]: ${r.url} len=${r.len} snippet=${r.snippet}`);
+    });
 
     // Парсим API-ответы
     let products = [];
     let total = 0;
 
-    for (const text of apiResponses) {
+    for (const r of apiResponses) {
+      if (!r.full) continue;
       try {
-        const data = JSON.parse(text);
+        const data = JSON.parse(r.full);
         const prods = data?.data?.products;
         if (prods?.length) {
           products = prods;
           total = data.data.total ?? prods.length;
-          console.log(`[wb] API response: ${prods.length} products, total: ${total}`);
+          console.log(`[wb] Parsed ${prods.length} products from API`);
           break;
         }
       } catch {}
     }
 
-    // Fallback: парсим DOM если API не перехватили
-    if (!products.length) {
-      console.log('[wb] API interception failed, trying DOM parsing...');
+    // Fallback: DOM
+    if (!products.length && hasCards) {
+      console.log('[wb] Trying DOM fallback...');
       const domProducts = await page.evaluate(() => {
-        const cards = document.querySelectorAll('[data-nm-id]');
-        return Array.from(cards).slice(0, 50).map((card) => {
-          const id = card.getAttribute('data-nm-id');
-          const nameEl = card.querySelector('[class*="goods-name"], [class*="product-card__name"], span[class*="Name"]');
-          const priceEl = card.querySelector('[class*="price-now"], [class*="lower-price"], ins');
-          const priceText = priceEl?.textContent?.replace(/\D/g, '') || '0';
-          return {
-            id: parseInt(id) || 0,
-            name: nameEl?.textContent?.trim() || '',
-            price: parseInt(priceText) || 0,
-          };
-        }).filter((p) => p.id && p.price > 0);
+        const items = [];
+        document.querySelectorAll('[data-nm-id], .product-card, .j-card-item').forEach((card) => {
+          const id = card.getAttribute('data-nm-id') || card.querySelector('[data-nm-id]')?.getAttribute('data-nm-id');
+          const nameEl = card.querySelector('[class*="goods-name"], [class*="product-card__name"], [class*="Name"], .goods-name');
+          const priceEl = card.querySelector('ins, [class*="lower-price"], [class*="price-now"], .price__lower');
+          const price = parseInt((priceEl?.textContent || '0').replace(/\D/g, ''));
+          if (id) items.push({ id: parseInt(id), name: nameEl?.textContent?.trim() || '', price });
+        });
+        return items;
       });
 
+      console.log(`[wb] DOM found: ${domProducts.length} cards`);
       if (domProducts.length) {
-        console.log(`[wb] DOM parsed: ${domProducts.length} products`);
-        products = domProducts.map((p) => ({
-          id: p.id,
-          name: p.name,
-          salePriceU: p.price * 100,
-        }));
+        products = domProducts.map((p) => ({ id: p.id, name: p.name, salePriceU: p.price * 100 }));
         total = domProducts.length;
       }
     }
 
-    const currentUrl = page.url();
-    console.log(`[wb] Final URL: ${currentUrl}, products: ${products.length}`);
+    // Последний fallback — скриншот для дебага
+    if (!products.length) {
+      const screenshot = await page.screenshot({ type: 'jpeg', quality: 50 });
+      const b64 = screenshot.toString('base64').slice(0, 500);
+      console.log(`[wb] Screenshot b64 (first 500): ${b64}`);
+    }
 
     await context.close();
     context = null;
-
-    if (!products.length) {
-      return res.json({ success: false, total: 0, count: 0, products: [] });
-    }
 
     const slim = products.slice(0, parseInt(limit)).map((p) => ({
       id: p.id,
@@ -139,7 +154,13 @@ app.get('/search', async (req, res) => {
       feedbacks: p.feedbacks || 0,
     }));
 
-    res.json({ success: true, total, count: slim.length, products: slim });
+    res.json({
+      success: products.length > 0,
+      total,
+      count: slim.length,
+      products: slim,
+      debug: { finalUrl, title, bodyLen, apiResponseCount: apiResponses.length, wbUrlCount: allUrls.length, hasCards },
+    });
 
   } catch (e) {
     console.error('[wb-parser] Error:', e.message);
