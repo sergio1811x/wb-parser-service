@@ -382,30 +382,43 @@ async function processJob(job) {
   const product = await fetchProduct(job.input_url);
   console.log(`[job] Product: ${product.titleCn?.slice(0, 30)}`);
 
-  // 2. Parallel: AI + WB + ZIP + Economics
-  const [seoContent, wbData, zipBase64, yuanToRub] = await Promise.all([
+  // 2. Parallel: AI + WB + Economics
+  const [seoContent, wbData, yuanToRub] = await Promise.all([
     generateSeo(product),
     searchWb(product.mainImageUrl),
-    buildZip(product.images),
     getYuanRate(),
   ]);
 
   const economics = calcEconomics(product.priceYuan, product.weightKg, wbData?.avgPrice, yuanToRub);
   const verdict = buildVerdict(economics, wbData, product.sold);
 
-  const fullProduct = {
-    ...product,
-    titleRu: seoContent.titleRu,
-    seoContent,
-    wbData,
-    economics,
-    verdict,
-  };
-
   const durationMs = Date.now() - startTime;
   console.log(`[job] Done in ${durationMs}ms`);
 
-  return { product: fullProduct, zipBase64, durationMs };
+  // Только данные для Telegram-сообщений, без тяжёлого контента
+  return {
+    product: {
+      productId: product.productId,
+      platform: product.platform,
+      titleCn: product.titleCn,
+      titleRu: seoContent.titleRu,
+      priceYuan: product.priceYuan,
+      priceRange: product.priceRange?.slice(0, 3),
+      moq: product.moq,
+      weightKg: product.weightKg,
+      supplierName: product.supplierName,
+      supplierRating: product.supplierRating,
+      supplierType: product.supplierType,
+      sold: product.sold,
+      stock: product.stock,
+      seoContent,
+      wbData,
+      economics,
+      verdict,
+    },
+    imageUrls: product.images,
+    durationMs,
+  };
 }
 
 // ─── Poll loop ───────────────────────────────────────────────────────────────
@@ -425,11 +438,18 @@ async function pollOnce() {
   const job = data;
   try {
     const result = await processJob(job);
-    await supabase.from('jobs').update({
+
+    const { error: updateErr } = await supabase.from('jobs').update({
       status: 'done',
       result_json: result,
       finished_at: new Date().toISOString(),
     }).eq('id', job.id);
+
+    if (updateErr) {
+      console.error(`[job] Supabase update failed:`, updateErr.message);
+    } else {
+      console.log(`[job] Saved to Supabase, status=done`);
+    }
   } catch (e) {
     console.error(`[job] Failed:`, e.message);
     await supabase.from('jobs').update({
