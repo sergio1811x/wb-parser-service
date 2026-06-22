@@ -345,6 +345,70 @@ app.get('/search', async (req, res) => {
   }
 });
 
+// ─── Получить цены по списку ID (через браузер) ─────────────────────────────
+
+app.get('/prices', async (req, res) => {
+  const { ids, secret } = req.query;
+
+  if (secret !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  if (!ids) return res.status(400).json({ error: 'ids param required' });
+
+  let context = null;
+  try {
+    const br = await getBrowser();
+    context = await br.newContext({
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+      locale: 'ru-RU',
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+
+    const page = await context.newPage();
+
+    // Открываем WB чтобы получить cookies
+    await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(3000);
+
+    // Делаем запрос к __internal API из контекста браузера
+    const nmList = String(ids).split(',').slice(0, 100).join(';');
+    const apiUrl = `https://www.wildberries.ru/__internal/u-card/cards/v4/list?appType=1&curr=rub&dest=-1257786&spp=30&lang=ru&ab_testing=false&nm=${nmList}`;
+
+    console.log(`[prices] Fetching ${nmList.split(';').length} products...`);
+
+    const data = await page.evaluate(async (url) => {
+      const res = await fetch(url, {
+        headers: {
+          'x-requested-with': 'XMLHttpRequest',
+        },
+      });
+      return res.json();
+    }, apiUrl);
+
+    await context.close();
+    context = null;
+
+    const products = data?.data?.products ?? [];
+    console.log(`[prices] Got ${products.length} products with prices`);
+
+    const slim = products.map((p) => ({
+      id: p.id,
+      name: p.name || '',
+      brand: p.brand || '',
+      price: p.sizes?.[0]?.price?.total ? Math.round(p.sizes[0].price.total / 100) : 0,
+      rating: p.reviewRating || 0,
+      feedbacks: p.feedbacks || 0,
+    }));
+
+    res.json({ success: slim.length > 0, count: slim.length, products: slim });
+
+  } catch (e) {
+    console.error('[prices] Error:', e.message);
+    if (context) await context.close().catch(() => {});
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
