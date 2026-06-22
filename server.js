@@ -392,14 +392,17 @@ app.get('/prices', async (req, res) => {
       return res.json();
     }, apiUrl);
 
-    const products = data?.data?.products ?? [];
+    const products = data?.data?.products ?? data?.products ?? [];
     console.log(`[prices] Got ${products.length} products with prices`);
+    if (!products.length) {
+      console.log(`[prices] Response keys: ${Object.keys(data || {}).join(',')}, snippet: ${JSON.stringify(data).slice(0, 200)}`);
+    }
 
     const slim = products.map((p) => ({
       id: p.id,
       name: p.name || '',
       brand: p.brand || '',
-      price: p.sizes?.[0]?.price?.total ? Math.round(p.sizes[0].price.total / 100) : 0,
+      price: p.sizes?.[0]?.price?.total ? Math.round(p.sizes[0].price.total / 100) : (p.salePriceU ? Math.round(p.salePriceU / 100) : 0),
       rating: p.reviewRating || 0,
       feedbacks: p.feedbacks || 0,
     }));
