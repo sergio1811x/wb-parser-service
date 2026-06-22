@@ -1,5 +1,9 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+
+// Apply stealth to avoid bot detection
+chromium.use(stealth);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -43,84 +47,79 @@ app.get('/search', async (req, res) => {
 
     const page = await context.newPage();
 
-    // Собираем все API-ответы
+    // Mask webdriver detection
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      window.chrome = { runtime: {} };
+    });
+
+    // Collect API responses
     const apiResponses = [];
-    const allUrls = [];
     page.on('response', async (response) => {
       try {
         const url = response.url();
-        if (url.includes('.wb.ru')) {
-          allUrls.push(url.slice(0, 120));
-        }
-        if ((url.includes('search.wb.ru') || url.includes('catalog.wb.ru') || url.includes('card.wb.ru')) && response.status() === 200) {
-          const ct = response.headers()['content-type'] || '';
-          if (ct.includes('json') || ct.includes('text')) {
-            const text = await response.text();
-            apiResponses.push({ url: url.slice(0, 150), len: text.length, snippet: text.slice(0, 200) });
-            if (text.includes('"products"')) {
-              apiResponses.push({ url, full: text });
-            }
+        if ((url.includes('search.wb.ru') || url.includes('catalog.wb.ru')) && response.status() === 200) {
+          const text = await response.text();
+          if (text.includes('"products"')) {
+            apiResponses.push(text);
           }
         }
       } catch {}
     });
 
-    const searchUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(query)}`;
-    console.log(`[wb] Opening: ${searchUrl}`);
+    // First visit main page to get cookies
+    console.log('[wb] Visiting main page for cookies...');
+    await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
 
+    // Now search
+    const searchUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(query)}`;
+    console.log(`[wb] Searching: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 45000 });
 
-    // Ждём карточки
+    // Wait for cards
     let hasCards = false;
     try {
-      await page.waitForSelector('.product-card, .product-card-list, [data-nm-id], .j-card-item', { timeout: 10000 });
+      await page.waitForSelector('.product-card, [data-nm-id], .j-card-item, .product-card-list', { timeout: 15000 });
       hasCards = true;
-      console.log('[wb] Cards found');
+      console.log('[wb] Cards found!');
     } catch {
-      console.log('[wb] No cards selector found');
+      console.log('[wb] No cards found');
     }
 
     await page.waitForTimeout(2000);
 
-    const finalUrl = page.url();
     const title = await page.title();
-    const bodyLen = await page.evaluate(() => document.body.innerText.length);
+    const finalUrl = page.url();
+    console.log(`[wb] Title: "${title}" URL: ${finalUrl}`);
 
-    console.log(`[wb] Final URL: ${finalUrl}`);
-    console.log(`[wb] Title: ${title}`);
-    console.log(`[wb] Body text length: ${bodyLen}`);
-    console.log(`[wb] WB URLs seen: ${allUrls.length}`);
-    console.log(`[wb] API responses: ${apiResponses.length}`);
-    apiResponses.forEach((r, i) => {
-      if (!r.full) console.log(`[wb] resp[${i}]: ${r.url} len=${r.len} snippet=${r.snippet}`);
-    });
-
-    // Парсим API-ответы
+    // Parse API responses
     let products = [];
     let total = 0;
 
-    for (const r of apiResponses) {
-      if (!r.full) continue;
+    for (const text of apiResponses) {
       try {
-        const data = JSON.parse(r.full);
+        const data = JSON.parse(text);
         const prods = data?.data?.products;
         if (prods?.length) {
           products = prods;
           total = data.data.total ?? prods.length;
-          console.log(`[wb] Parsed ${prods.length} products from API`);
+          console.log(`[wb] Got ${prods.length} products from API, total: ${total}`);
           break;
         }
       } catch {}
     }
 
-    // Fallback: DOM
+    // DOM fallback
     if (!products.length && hasCards) {
-      console.log('[wb] Trying DOM fallback...');
+      console.log('[wb] DOM fallback...');
       const domProducts = await page.evaluate(() => {
         const items = [];
         document.querySelectorAll('[data-nm-id], .product-card, .j-card-item').forEach((card) => {
           const id = card.getAttribute('data-nm-id') || card.querySelector('[data-nm-id]')?.getAttribute('data-nm-id');
-          const nameEl = card.querySelector('[class*="goods-name"], [class*="product-card__name"], [class*="Name"], .goods-name');
+          const nameEl = card.querySelector('[class*="goods-name"], [class*="Name"], .goods-name');
           const priceEl = card.querySelector('ins, [class*="lower-price"], [class*="price-now"], .price__lower');
           const price = parseInt((priceEl?.textContent || '0').replace(/\D/g, ''));
           if (id) items.push({ id: parseInt(id), name: nameEl?.textContent?.trim() || '', price });
@@ -128,18 +127,11 @@ app.get('/search', async (req, res) => {
         return items;
       });
 
-      console.log(`[wb] DOM found: ${domProducts.length} cards`);
       if (domProducts.length) {
+        console.log(`[wb] DOM: ${domProducts.length} cards`);
         products = domProducts.map((p) => ({ id: p.id, name: p.name, salePriceU: p.price * 100 }));
         total = domProducts.length;
       }
-    }
-
-    // Последний fallback — скриншот для дебага
-    if (!products.length) {
-      const screenshot = await page.screenshot({ type: 'jpeg', quality: 50 });
-      const b64 = screenshot.toString('base64').slice(0, 500);
-      console.log(`[wb] Screenshot b64 (first 500): ${b64}`);
     }
 
     await context.close();
@@ -159,7 +151,7 @@ app.get('/search', async (req, res) => {
       total,
       count: slim.length,
       products: slim,
-      debug: { finalUrl, title, bodyLen, apiResponseCount: apiResponses.length, wbUrlCount: allUrls.length, hasCards },
+      debug: { title, finalUrl, hasCards, apiResponseCount: apiResponses.length },
     });
 
   } catch (e) {
