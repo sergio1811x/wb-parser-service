@@ -124,12 +124,32 @@ app.get('/search', async (req, res) => {
     if (!products.length) {
       const domProducts = await page.evaluate(() => {
         const items = [];
-        document.querySelectorAll('[data-nm-id], .product-card, .j-card-item').forEach((card) => {
-          const id = card.getAttribute('data-nm-id') || card.querySelector('[data-nm-id]')?.getAttribute('data-nm-id');
-          const nameEl = card.querySelector('[class*="goods-name"], [class*="Name"]');
-          const priceEl = card.querySelector('ins, [class*="lower-price"], [class*="price-now"]');
-          const price = parseInt((priceEl?.textContent || '0').replace(/\D/g, ''));
-          if (id) items.push({ id: parseInt(id), name: nameEl?.textContent?.trim() || '', price });
+        document.querySelectorAll('.product-card, .product-card-list .product-card, article').forEach((card) => {
+          // ID
+          const link = card.querySelector('a[href*="/catalog/"]');
+          const href = link?.getAttribute('href') || '';
+          const idMatch = href.match(/\/catalog\/(\d+)/);
+          const nmId = card.getAttribute('data-nm-id');
+          const id = nmId || (idMatch ? idMatch[1] : null);
+          if (!id) return;
+
+          // Имя — пробуем разные селекторы
+          const nameEl = card.querySelector(
+            '.product-card__name, .goods-name, [class*="ProductCardBody"] span, [class*="product-card__brand-wrap"] span:last-child, p'
+          );
+          const brandEl = card.querySelector('.product-card__brand, [class*="brand"]');
+          const name = nameEl?.textContent?.trim() || '';
+          const brand = brandEl?.textContent?.trim() || '';
+
+          // Цена — ищем все числа в карточке, берём наименьшее разумное
+          const allText = card.textContent || '';
+          const priceMatches = allText.match(/\d[\d\s]*₽/g) || [];
+          const prices = priceMatches
+            .map((p) => parseInt(p.replace(/\s/g, '').replace('₽', '')))
+            .filter((p) => p > 10 && p < 1000000);
+          const price = prices.length ? Math.min(...prices) : 0;
+
+          items.push({ id: parseInt(id), name: brand ? `${brand} / ${name}` : name, price });
         });
         return items;
       });
