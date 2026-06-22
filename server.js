@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3001;
 const SECRET = process.env.SECRET || 'cardzip-wb-2024';
 
 let browser = null;
+let warmPage = null; // Тёплая страница с cookies WB
 
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
@@ -25,6 +26,29 @@ async function getBrowser() {
   }
   return browser;
 }
+
+// Прогреть страницу WB при старте — получить cookies один раз
+async function getWarmPage() {
+  if (warmPage && !warmPage.isClosed()) return warmPage;
+
+  console.log('[warm] Creating warm WB page...');
+  const br = await getBrowser();
+  const ctx = await br.newContext({
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+    locale: 'ru-RU',
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  warmPage = await ctx.newPage();
+  await warmPage.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await warmPage.waitForTimeout(3000);
+  console.log('[warm] WB page ready with cookies');
+  return warmPage;
+}
+
+// Прогреваем при старте
+setTimeout(() => getWarmPage().catch(e => console.error('[warm] Failed:', e.message)), 2000);
 
 // ─── Поиск по фото ──────────────────────────────────────────────────────────
 
@@ -353,40 +377,20 @@ app.get('/prices', async (req, res) => {
   if (secret !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
   if (!ids) return res.status(400).json({ error: 'ids param required' });
 
-  let context = null;
   try {
-    const br = await getBrowser();
-    context = await br.newContext({
-      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
-      locale: 'ru-RU',
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
+    const page = await getWarmPage();
 
-    const page = await context.newPage();
-
-    // Открываем WB чтобы получить cookies
-    await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
-
-    // Делаем запрос к __internal API из контекста браузера
     const nmList = String(ids).split(',').slice(0, 100).join(';');
     const apiUrl = `https://www.wildberries.ru/__internal/u-card/cards/v4/list?appType=1&curr=rub&dest=-1257786&spp=30&lang=ru&ab_testing=false&nm=${nmList}`;
 
-    console.log(`[prices] Fetching ${nmList.split(';').length} products...`);
+    console.log(`[prices] Fetching ${nmList.split(';').length} products via warm page...`);
 
     const data = await page.evaluate(async (url) => {
       const res = await fetch(url, {
-        headers: {
-          'x-requested-with': 'XMLHttpRequest',
-        },
+        headers: { 'x-requested-with': 'XMLHttpRequest' },
       });
       return res.json();
     }, apiUrl);
-
-    await context.close();
-    context = null;
 
     const products = data?.data?.products ?? [];
     console.log(`[prices] Got ${products.length} products with prices`);
@@ -404,7 +408,8 @@ app.get('/prices', async (req, res) => {
 
   } catch (e) {
     console.error('[prices] Error:', e.message);
-    if (context) await context.close().catch(() => {});
+    // Пересоздаём тёплую страницу при ошибке
+    warmPage = null;
     res.status(500).json({ success: false, error: e.message });
   }
 });
