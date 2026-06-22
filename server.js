@@ -2,7 +2,6 @@ const express = require('express');
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 
-// Apply stealth to avoid bot detection
 chromium.use(stealth);
 
 const app = express();
@@ -14,8 +13,14 @@ let browser = null;
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
     browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      headless: false, // Настоящий браузер, не headless-shell
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--window-size=1920,1080',
+      ],
     });
   }
   return browser;
@@ -40,22 +45,11 @@ app.get('/search', async (req, res) => {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
       locale: 'ru-RU',
       viewport: { width: 1920, height: 1080 },
-      extraHTTPHeaders: {
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-      },
     });
 
     const page = await context.newPage();
 
-    // Mask webdriver detection
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      window.chrome = { runtime: {} };
-    });
-
-    // Collect API responses
+    // Перехватываем API-ответы WB
     const apiResponses = [];
     page.on('response', async (response) => {
       try {
@@ -69,33 +63,30 @@ app.get('/search', async (req, res) => {
       } catch {}
     });
 
-    // First visit main page to get cookies
-    console.log('[wb] Visiting main page for cookies...');
+    // Сначала главная для cookies
     await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
 
-    // Now search
+    // Поиск
     const searchUrl = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(query)}`;
-    console.log(`[wb] Searching: ${searchUrl}`);
+    console.log(`[wb] Searching: ${query}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 45000 });
 
-    // Wait for cards
-    let hasCards = false;
+    // Ждём карточки
     try {
-      await page.waitForSelector('.product-card, [data-nm-id], .j-card-item, .product-card-list', { timeout: 15000 });
-      hasCards = true;
-      console.log('[wb] Cards found!');
+      await page.waitForSelector('.product-card, [data-nm-id], .j-card-item', { timeout: 15000 });
+      console.log('[wb] Cards found');
     } catch {
-      console.log('[wb] No cards found');
+      console.log('[wb] No cards, waiting...');
+      await page.waitForTimeout(5000);
     }
 
     await page.waitForTimeout(2000);
 
     const title = await page.title();
-    const finalUrl = page.url();
-    console.log(`[wb] Title: "${title}" URL: ${finalUrl}`);
+    console.log(`[wb] Title: "${title}"`);
 
-    // Parse API responses
+    // Парсим API-ответы
     let products = [];
     let total = 0;
 
@@ -106,21 +97,20 @@ app.get('/search', async (req, res) => {
         if (prods?.length) {
           products = prods;
           total = data.data.total ?? prods.length;
-          console.log(`[wb] Got ${prods.length} products from API, total: ${total}`);
+          console.log(`[wb] API: ${prods.length} products, total: ${total}`);
           break;
         }
       } catch {}
     }
 
     // DOM fallback
-    if (!products.length && hasCards) {
-      console.log('[wb] DOM fallback...');
+    if (!products.length) {
       const domProducts = await page.evaluate(() => {
         const items = [];
         document.querySelectorAll('[data-nm-id], .product-card, .j-card-item').forEach((card) => {
           const id = card.getAttribute('data-nm-id') || card.querySelector('[data-nm-id]')?.getAttribute('data-nm-id');
-          const nameEl = card.querySelector('[class*="goods-name"], [class*="Name"], .goods-name');
-          const priceEl = card.querySelector('ins, [class*="lower-price"], [class*="price-now"], .price__lower');
+          const nameEl = card.querySelector('[class*="goods-name"], [class*="Name"]');
+          const priceEl = card.querySelector('ins, [class*="lower-price"], [class*="price-now"]');
           const price = parseInt((priceEl?.textContent || '0').replace(/\D/g, ''));
           if (id) items.push({ id: parseInt(id), name: nameEl?.textContent?.trim() || '', price });
         });
@@ -151,7 +141,6 @@ app.get('/search', async (req, res) => {
       total,
       count: slim.length,
       products: slim,
-      debug: { title, finalUrl, hasCards, apiResponseCount: apiResponses.length },
     });
 
   } catch (e) {
