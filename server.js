@@ -127,27 +127,31 @@ app.get('/search-by-image', async (req, res) => {
     // Загружаем фото
     console.log('[img] Uploading...');
     await fileInput.setInputFiles(tmpPath);
+    console.log('[img] File set, waiting for modal...');
 
-    // Ждём модалку "Выберите область с товаром" — появляется через 2-4с
-    console.log('[img] Waiting for crop modal...');
-    try {
-      const findBtn = await page.waitForSelector(
-        'button#searchGoodsButton',
-        { timeout: 10000 }
-      );
-      await page.waitForTimeout(500); // маленькая пауза для стабильности
-      await findBtn.click();
-      console.log('[img] Clicked "Найти товар"');
-    } catch {
-      // Попробуем по aria-label
+    // Ждём модалку — пробуем несколько раз
+    let clicked = false;
+    for (let attempt = 0; attempt < 3 && !clicked; attempt++) {
       try {
-        const altBtn = await page.waitForSelector('button[aria-label="Найти товар"]', { timeout: 3000 });
-        await altBtn.click();
-        console.log('[img] Clicked via aria-label');
+        // Ждём контейнер модалки
+        await page.waitForSelector('#cropPopupSuccess, .popup-crop-search-image, button#searchGoodsButton', { timeout: 5000 });
+        await page.waitForTimeout(500);
+
+        // Кликаем кнопку
+        const btn = await page.$('button#searchGoodsButton') || await page.$('button[aria-label="Найти товар"]');
+        if (btn) {
+          await btn.click();
+          clicked = true;
+          console.log('[img] Clicked "Найти товар"');
+        } else {
+          console.log(`[img] Attempt ${attempt + 1}: modal visible but no button, retrying...`);
+          await page.waitForTimeout(2000);
+        }
       } catch {
-        console.log('[img] No find button found');
+        console.log(`[img] Attempt ${attempt + 1}: no modal yet`);
       }
     }
+    if (!clicked) console.log('[img] Could not click find button after 3 attempts');
 
     // Ждём результаты
     try {
