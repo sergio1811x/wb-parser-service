@@ -23,7 +23,6 @@ async function getBrowser() {
   return browser;
 }
 
-// Прогреть: открыть WB, получить cookies
 async function ensureWarmPage() {
   if (warmPage && !warmPage.isClosed()) return warmPage;
 
@@ -45,7 +44,6 @@ async function ensureWarmPage() {
   return warmPage;
 }
 
-// Прогрев при старте + обновление каждые 30 мин
 setTimeout(() => ensureWarmPage().catch(e => console.error('[warm]', e.message)), 2000);
 setInterval(async () => {
   try {
@@ -62,30 +60,25 @@ setInterval(async () => {
 // ─── Поиск по фото через браузер ────────────────────────────────────────────
 
 app.get('/search-by-image', async (req, res) => {
-  const { image_url, secret } = req.query;
+  const { image_url, secret, query } = req.query;
   if (secret !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
-  if (!image_url) return res.status(400).json({ error: 'image_url required' });
+  if (!image_url && !query) return res.status(400).json({ error: 'image_url or query required' });
 
   let page = null;
   try {
-    // Скачиваем фото
-    console.log(`[img] Downloading: ${String(image_url).slice(0, 60)}...`);
-    const imgResp = await fetch(String(image_url), { signal: AbortSignal.timeout(10000) });
-    if (!imgResp.ok) throw new Error(`Image download: ${imgResp.status}`);
-    const imgBuffer = Buffer.from(await imgResp.arrayBuffer());
-    const tmpPath = '/tmp/wb_search_img.jpg';
-    fs.writeFileSync(tmpPath, imgBuffer);
-    console.log(`[img] Downloaded: ${imgBuffer.length} bytes`);
-
-    // Используем новую страницу в тёплом контексте (cookies уже есть)
     await ensureWarmPage();
     page = await warmCtx.newPage();
 
-    // Перехватываем API-ответы
+    // Перехватываем API-ответы WB
     const apiProducts = [];
     page.on('response', async (response) => {
       try {
         const url = response.url();
+        if (url.includes('/catalog') && url.includes('search') && response.status() === 200) {
+          const data = await response.json();
+          const prods = data?.data?.products ?? [];
+          if (prods.length) apiProducts.push(...prods);
+        }
         if ((url.includes('__internal') || url.includes('card.wb.ru')) && url.includes('list') && response.status() === 200) {
           const data = await response.json();
           const prods = data?.data?.products ?? data?.products ?? [];
@@ -94,75 +87,155 @@ app.get('/search-by-image', async (req, res) => {
       } catch {}
     });
 
-    // Открываем страницу поиска
-    await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(2000);
+    let photoSearchConfirmed = false;
 
-    // Ищем file input для фото
-    let fileInput = await page.$('input[type="file"]');
-    if (!fileInput) {
-      // Кликаем на камеру
-      const clicked = await page.evaluate(() => {
-        const el = document.querySelector('[data-wba-header-name="Search_photo"], label[for*="image"], .search-catalog__photo');
-        if (el) { el.click(); return true; }
-        const search = document.querySelector('input[type="search"], #searchInput');
-        if (!search) return false;
-        const sr = search.getBoundingClientRect();
-        const btns = document.querySelectorAll('button, label');
-        for (const b of btns) {
-          const r = b.getBoundingClientRect();
-          if (r.x > sr.right - 50 && Math.abs(r.y - sr.y) < 20 && r.width < 60) { b.click(); return true; }
-        }
-        return false;
-      });
-      if (clicked) await page.waitForTimeout(1500);
-      fileInput = await page.$('input[type="file"]');
-    }
+    if (image_url) {
+      // === ПОИСК ПО ФОТО ===
+      console.log(`[img] Downloading: ${String(image_url).slice(0, 60)}...`);
+      const imgResp = await fetch(String(image_url), { signal: AbortSignal.timeout(10000) });
+      if (!imgResp.ok) throw new Error(`Image download: ${imgResp.status}`);
+      const imgBuffer = Buffer.from(await imgResp.arrayBuffer());
+      const tmpPath = '/tmp/wb_search_img.jpg';
+      fs.writeFileSync(tmpPath, imgBuffer);
+      console.log(`[img] Downloaded: ${imgBuffer.length} bytes`);
 
-    if (!fileInput) {
-      await page.close();
-      return res.json({ success: false, error: 'File input not found' });
-    }
+      await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(2000);
 
-    // Загружаем фото
-    console.log('[img] Uploading...');
-    await fileInput.setInputFiles(tmpPath);
-    console.log('[img] File set, waiting for modal...');
-
-    // Ждём модалку — пробуем несколько раз
-    let clicked = false;
-    for (let attempt = 0; attempt < 3 && !clicked; attempt++) {
-      try {
-        // Ждём контейнер модалки
-        await page.waitForSelector('#cropPopupSuccess, .popup-crop-search-image, button#searchGoodsButton', { timeout: 5000 });
-        await page.waitForTimeout(500);
-
-        // Кликаем кнопку
-        const btn = await page.$('button#searchGoodsButton') || await page.$('button[aria-label="Найти товар"]');
-        if (btn) {
-          await btn.click();
-          clicked = true;
-          console.log('[img] Clicked "Найти товар"');
-        } else {
-          console.log(`[img] Attempt ${attempt + 1}: modal visible but no button, retrying...`);
+      // Попытка загрузки фото — до 2 полных циклов
+      for (let cycle = 0; cycle < 2 && !photoSearchConfirmed; cycle++) {
+        if (cycle > 0) {
+          console.log(`[img] Retry cycle ${cycle + 1}`);
+          await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
           await page.waitForTimeout(2000);
         }
-      } catch {
-        console.log(`[img] Attempt ${attempt + 1}: no modal yet`);
+
+        // Найти file input
+        let fileInput = await page.$('input[type="file"]');
+        if (!fileInput) {
+          const clicked = await page.evaluate(() => {
+            const selectors = [
+              '[data-wba-header-name="Search_photo"]',
+              'label[for*="image"]',
+              '.search-catalog__photo',
+              '[class*="photo-search"]',
+              '[class*="camera"]',
+            ];
+            for (const sel of selectors) {
+              const el = document.querySelector(sel);
+              if (el) { el.click(); return true; }
+            }
+            const search = document.querySelector('input[type="search"], #searchInput, [class*="search__input"]');
+            if (!search) return false;
+            const sr = search.getBoundingClientRect();
+            const btns = document.querySelectorAll('button, label, span, div');
+            for (const b of btns) {
+              const r = b.getBoundingClientRect();
+              if (r.x > sr.right - 60 && Math.abs(r.y - sr.y) < 30 && r.width < 60 && r.width > 10) {
+                b.click();
+                return true;
+              }
+            }
+            return false;
+          });
+          if (clicked) await page.waitForTimeout(1500);
+          fileInput = await page.$('input[type="file"]');
+        }
+
+        if (!fileInput) {
+          console.log(`[img] Cycle ${cycle + 1}: file input not found`);
+          continue;
+        }
+
+        // Загружаем фото
+        console.log('[img] Uploading...');
+        await fileInput.setInputFiles(tmpPath);
+
+        // Ждём модалку crop — увеличенный таймаут
+        let findBtnClicked = false;
+        for (let attempt = 0; attempt < 4 && !findBtnClicked; attempt++) {
+          try {
+            await page.waitForSelector(
+              '#cropPopupSuccess, .popup-crop-search-image, button#searchGoodsButton, [class*="crop"]',
+              { timeout: 8000 }
+            );
+            await page.waitForTimeout(800);
+
+            // Ищем кнопку по нескольким стратегиям
+            findBtnClicked = await page.evaluate(() => {
+              // 1. По ID
+              const byId = document.querySelector('button#searchGoodsButton');
+              if (byId) { byId.click(); return true; }
+
+              // 2. По aria-label
+              const byAria = document.querySelector('button[aria-label="Найти товар"]');
+              if (byAria) { byAria.click(); return true; }
+
+              // 3. По тексту кнопки
+              const buttons = document.querySelectorAll('button');
+              for (const btn of buttons) {
+                const text = btn.textContent?.trim().toLowerCase() || '';
+                if (text.includes('найти товар') || text.includes('найти') || text === 'поиск') {
+                  btn.click();
+                  return true;
+                }
+              }
+
+              // 4. Кнопка внутри crop popup
+              const popup = document.querySelector('#cropPopupSuccess, .popup-crop-search-image, [class*="crop"]');
+              if (popup) {
+                const popupBtn = popup.querySelector('button');
+                if (popupBtn) { popupBtn.click(); return true; }
+              }
+
+              return false;
+            });
+
+            if (findBtnClicked) {
+              console.log('[img] Clicked "Найти товар"');
+            } else {
+              console.log(`[img] Attempt ${attempt + 1}: modal visible but button not found`);
+              await page.waitForTimeout(2000);
+            }
+          } catch {
+            console.log(`[img] Attempt ${attempt + 1}: no modal yet`);
+          }
+        }
+
+        if (findBtnClicked) {
+          photoSearchConfirmed = true;
+        }
       }
-    }
-    if (!clicked) console.log('[img] Could not click find button after 3 attempts');
 
-    // Ждём результаты
-    try {
-      await page.waitForSelector('.product-card, [data-nm-id]', { timeout: 15000 });
-      console.log('[img] Cards found');
-    } catch {
-      console.log('[img] No cards');
-    }
-    await page.waitForTimeout(2000);
+      // Ждём результаты
+      if (photoSearchConfirmed) {
+        try {
+          await page.waitForSelector('.product-card, [data-nm-id], .product-card-list', { timeout: 15000 });
+          console.log('[img] Cards appeared');
+        } catch {
+          console.log('[img] Timeout waiting for cards');
+        }
+        await page.waitForTimeout(3000);
+      } else {
+        console.log('[img] Photo search not confirmed, falling back to text search');
+      }
 
-    // Парсим: приоритет API-перехват, потом DOM
+      try { fs.unlinkSync(tmpPath); } catch {}
+
+      // Если фото-поиск не сработал и есть текстовый запрос — fallback
+      if (!photoSearchConfirmed && query && apiProducts.length === 0) {
+        await doTextSearch(page, String(query));
+        await page.waitForTimeout(3000);
+      }
+    } else if (query) {
+      // === ТЕКСТОВЫЙ ПОИСК (fallback) ===
+      await page.goto('https://www.wildberries.ru/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(2000);
+      await doTextSearch(page, String(query));
+      await page.waitForTimeout(3000);
+    }
+
+    // Собираем продукты: приоритет API-перехват, потом DOM
     let products = [];
     let total = 0;
 
@@ -199,7 +272,6 @@ app.get('/search-by-image', async (req, res) => {
     }
 
     await page.close();
-    try { fs.unlinkSync(tmpPath); } catch {}
 
     const slim = products.slice(0, 50).map(p => ({
       id: p.id,
@@ -211,14 +283,39 @@ app.get('/search-by-image', async (req, res) => {
       feedbacks: p.feedbacks || 0,
     }));
 
-    res.json({ success: slim.length > 0, total, count: slim.length, products: slim });
+    res.json({
+      success: slim.length > 0,
+      total,
+      count: slim.length,
+      products: slim,
+      photoSearchConfirmed,
+    });
 
   } catch (e) {
     console.error('[img] Error:', e.message);
     if (page) await page.close().catch(() => {});
-    res.status(500).json({ success: false, error: e.message });
+    res.status(500).json({ success: false, error: e.message, photoSearchConfirmed: false });
   }
 });
+
+// Текстовый поиск в строку WB
+async function doTextSearch(page, query) {
+  console.log(`[txt] Text search: "${query}"`);
+  const searchInput = await page.$('input[type="search"], #searchInput, [class*="search__input"]');
+  if (!searchInput) {
+    console.log('[txt] Search input not found');
+    return;
+  }
+  await searchInput.click();
+  await searchInput.fill(query);
+  await page.keyboard.press('Enter');
+  try {
+    await page.waitForSelector('.product-card, [data-nm-id]', { timeout: 12000 });
+    console.log('[txt] Results appeared');
+  } catch {
+    console.log('[txt] No results');
+  }
+}
 
 // ─── Получить цены по ID ─────────────────────────────────────────────────────
 
@@ -259,7 +356,7 @@ app.get('/prices', async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok', uptime: process.uptime(), hasBrowser: !!browser?.isConnected(), hasWarmPage: !!warmPage && !warmPage?.isClosed() });
 });
 
 app.listen(PORT, () => console.log(`WB Parser running on port ${PORT}`));
