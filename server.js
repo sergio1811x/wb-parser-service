@@ -127,18 +127,26 @@ app.get('/search-by-image', async (req, res) => {
     // Загружаем фото
     console.log('[img] Uploading...');
     await fileInput.setInputFiles(tmpPath);
-    await page.waitForTimeout(2000);
 
-    // Нажимаем "Найти товар"
+    // Ждём модалку "Выберите область с товаром" — появляется через 2-4с
+    console.log('[img] Waiting for crop modal...');
     try {
       const findBtn = await page.waitForSelector(
-        'button#searchGoodsButton, button[aria-label="Найти товар"], .popup-crop-search-image__button, button.btn-main',
-        { timeout: 5000 }
+        'button#searchGoodsButton',
+        { timeout: 10000 }
       );
+      await page.waitForTimeout(500); // маленькая пауза для стабильности
       await findBtn.click();
       console.log('[img] Clicked "Найти товар"');
     } catch {
-      console.log('[img] No find button, may auto-search');
+      // Попробуем по aria-label
+      try {
+        const altBtn = await page.waitForSelector('button[aria-label="Найти товар"]', { timeout: 3000 });
+        await altBtn.click();
+        console.log('[img] Clicked via aria-label');
+      } catch {
+        console.log('[img] No find button found');
+      }
     }
 
     // Ждём результаты
