@@ -41,6 +41,13 @@ app.get('/search-by-text', async (req, res) => {
       price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : 0,
       rating: p.reviewRating || 0,
       feedbacks: p.feedbacks || 0,
+      wh: p.wh || null,
+      time1: p.time1 || null,
+      time2: p.time2 || null,
+      dist: p.dist || null,
+      kindId: p.kindId || null,
+      seller: p.seller?.name || '',
+      supplierId: p.supplierId || null,
     })).filter(p => p.price > 0);
 
     console.log(`[search] ${slim.length} products`);
