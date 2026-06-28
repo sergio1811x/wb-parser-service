@@ -75,7 +75,9 @@ async function fetchWb(query, maxResults, session) {
       const response = await fetch(url, fetchOpts);
 
       if (response.status === 429) {
-        const delay = (attempt + 1) * 3000;
+        const base = (attempt + 1) * 2500;
+        const jitter = Math.floor(Math.random() * 2000);
+        const delay = base + jitter;
         console.warn(`[search] 429 rate limit, retry in ${delay}ms`);
         await new Promise(r => setTimeout(r, delay));
         continue;
