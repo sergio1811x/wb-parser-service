@@ -1,32 +1,90 @@
 const express = require('express');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SECRET = process.env.SECRET || 'cardzip-wb-2024';
+// Пул резидентных прокси — ротация по портам
+const PROXY_USER = process.env.PROXY_USER || '7fb39cd2e336e19f';
+const PROXY_PASS = process.env.PROXY_PASS || 'xizCBNQAYhVsGaFw';
+const PROXY_HOST = process.env.PROXY_HOST || 'res.geonix.com';
+const PROXY_PORTS = (process.env.PROXY_PORTS || '10010,10011,10012,10013,10014,10015,10016,10017,10018,10019').split(',').map(s => s.trim());
+let proxyIdx = 0;
 
-// Rate limit: не больше 3 запросов в секунду к WB
+function getProxyUrl() {
+  if (!PROXY_PORTS.length) return null;
+  const port = PROXY_PORTS[proxyIdx % PROXY_PORTS.length];
+  proxyIdx++;
+  return `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${port}`;
+}
+
+// ─── Chrome-like профили (sticky на сессию) ─────────────────────────────────
+
+const CHROME_VERSIONS = [
+  '136.0.7103.92', '136.0.7103.113', '135.0.7049.84',
+  '134.0.6998.166', '133.0.6943.127',
+];
+
+const PLATFORMS = [
+  { platform: '"Windows"', ua: 'Windows NT 10.0; Win64; x64' },
+  { platform: '"Windows"', ua: 'Windows NT 11.0; Win64; x64' },
+  { platform: '"macOS"', ua: 'Macintosh; Intel Mac OS X 10_15_7' },
+];
+
+function createSession() {
+  const chrome = CHROME_VERSIONS[Math.floor(Math.random() * CHROME_VERSIONS.length)];
+  const majorVer = chrome.split('.')[0];
+  const plat = PLATFORMS[Math.floor(Math.random() * PLATFORMS.length)];
+
+  return {
+    headers: {
+      'accept': 'application/json, text/plain, */*',
+      'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      'cache-control': 'no-cache',
+      'pragma': 'no-cache',
+      'sec-ch-ua': `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="8"`,
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': plat.platform,
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'cross-site',
+      'origin': 'https://www.wildberries.ru',
+      'referer': 'https://www.wildberries.ru/',
+      'user-agent': `Mozilla/5.0 (${plat.ua}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chrome} Safari/537.36`,
+    },
+    proxyUrl: getProxyUrl(),
+    createdAt: Date.now(),
+  };
+}
+
+// ─── Throttle ───────────────────────────────────────────────────────────────
+
 let lastRequestTime = 0;
+const THROTTLE_MS = PROXY_PORTS.length ? 800 : 1000;
+
 async function throttle() {
   const now = Date.now();
-  const wait = Math.max(0, 350 - (now - lastRequestTime));
+  const wait = Math.max(0, THROTTLE_MS - (now - lastRequestTime));
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastRequestTime = Date.now();
 }
 
-async function fetchWb(query, maxResults) {
+// ─── WB Fetch ───────────────────────────────────────────────────────────────
+
+async function fetchWb(query, maxResults, session) {
   const encoded = encodeURIComponent(query);
   const url = `https://search.wb.ru/exactmatch/ru/common/v7/search?appType=1&curr=rub&dest=-1257786&query=${encoded}&resultset=catalog&sort=popular&spp=30`;
+
+  const fetchOpts = {
+    headers: session.headers,
+    signal: AbortSignal.timeout(10000),
+  };
+  if (session.proxyUrl) fetchOpts.agent = new HttpsProxyAgent(session.proxyUrl);
 
   for (let attempt = 0; attempt < 3; attempt++) {
     await throttle();
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15',
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(8000),
-      });
+      const response = await fetch(url, fetchOpts);
 
       if (response.status === 429) {
         const delay = (attempt + 1) * 2000;
@@ -50,6 +108,37 @@ async function fetchWb(query, maxResults) {
   return [];
 }
 
+// ─── Slim products ──────────────────────────────────────────────────────────
+
+function slimProducts(products, source = 'text', query = '') {
+  return products.map((p, index) => ({
+    id: p.id,
+    nmId: p.id,
+    name: p.name || '',
+    title: p.name || '',
+    brand: p.brand || '',
+    price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : 0,
+    rating: p.reviewRating || 0,
+    feedbacks: p.feedbacks || 0,
+    wh: p.wh || null,
+    time1: p.time1 || null,
+    time2: p.time2 || null,
+    dist: p.dist || null,
+    kindId: p.kindId || null,
+    subjectId: p.subjectId || null,
+    subjectName: p.subjectName || '',
+    seller: p.seller?.name || '',
+    supplierId: p.supplierId || null,
+    marketType: 'local_wb_market',
+    source,
+    query,
+    queryType: source,
+    photoRank: index + 1,
+  })).filter(p => p.price > 0 && p.name);
+}
+
+// ─── Routes ─────────────────────────────────────────────────────────────────
+
 app.get('/search-by-text', async (req, res) => {
   const { query, secret, limit } = req.query;
   if (secret !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
@@ -57,25 +146,11 @@ app.get('/search-by-text', async (req, res) => {
 
   try {
     const maxResults = Math.min(parseInt(limit) || 100, 100);
+    const session = createSession();
     console.log(`[search] "${String(query).slice(0, 40)}"`);
 
-    const products = await fetchWb(String(query), maxResults);
-
-    const slim = products.map(p => ({
-      id: p.id,
-      name: p.name || '',
-      brand: p.brand || '',
-      price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : 0,
-      rating: p.reviewRating || 0,
-      feedbacks: p.feedbacks || 0,
-      wh: p.wh || null,
-      time1: p.time1 || null,
-      time2: p.time2 || null,
-      dist: p.dist || null,
-      kindId: p.kindId || null,
-      seller: p.seller?.name || '',
-      supplierId: p.supplierId || null,
-    })).filter(p => p.price > 0);
+    const products = await fetchWb(String(query), maxResults, session);
+    const slim = slimProducts(products, 'text', String(query));
 
     console.log(`[search] ${slim.length} products`);
     res.json({ success: slim.length > 0, total: products.length, count: slim.length, products: slim });
@@ -85,32 +160,19 @@ app.get('/search-by-text', async (req, res) => {
   }
 });
 
-// ─── Batch search: несколько запросов с throttling ───────────────────────────
-
 app.post('/search-batch', express.json(), async (req, res) => {
   const { queries, secret, limit } = req.body ?? {};
   if (secret !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
   if (!queries?.length) return res.status(400).json({ error: 'queries required' });
 
   const maxResults = Math.min(parseInt(limit) || 100, 100);
+  // Одна сессия на весь batch (sticky: один IP + один UA)
+  const session = createSession();
   const results = [];
 
   for (const query of queries.slice(0, 15)) {
-    const products = await fetchWb(String(query), maxResults);
-    const slim = products.map(p => ({
-      id: p.id,
-      name: p.name || '',
-      brand: p.brand || '',
-      price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : 0,
-      rating: p.reviewRating || 0,
-      feedbacks: p.feedbacks || 0,
-      wh: p.wh || null,
-      time1: p.time1 || null,
-      time2: p.time2 || null,
-      dist: p.dist || null,
-      seller: p.seller?.name || '',
-      supplierId: p.supplierId || null,
-    })).filter(p => p.price > 0);
+    const products = await fetchWb(String(query), maxResults, session);
+    const slim = slimProducts(products, 'text', String(query));
     results.push({ query, count: slim.length, products: slim });
   }
 
@@ -118,7 +180,16 @@ app.post('/search-batch', express.json(), async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', mode: 'text-only', uptime: process.uptime() });
+  res.json({
+    status: 'ok',
+    mode: 'text-only',
+    proxy: PROXY_PORTS.length ? `${PROXY_PORTS.length} ports` : 'direct',
+    uptime: process.uptime(),
+  });
 });
 
-app.listen(PORT, () => console.log(`WB Parser (text-only) running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`WB Parser (text-only) running on port ${PORT}`);
+  console.log(`Proxy: ${PROXY_PORTS.length ? `${PROXY_PORTS.length} ports via ${PROXY_HOST}` : 'NO (direct)'}`);
+  console.log(`Throttle: ${THROTTLE_MS}ms`);
+});

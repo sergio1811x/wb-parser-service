@@ -285,16 +285,35 @@ async function searchWb(imageUrl) {
 
     if (!prices.length) return null;
 
+    const allCards = products.map((p, index) => {
+      const pr = p.sizes?.[0]?.price?.product;
+      const price = pr ? Math.round(pr / 100) : (p.salePriceU ? Math.round(p.salePriceU / 100) : (p.price || 0));
+      return {
+        id: p.id,
+        nmId: p.id,
+        title: p.name || '',
+        name: p.name || '',
+        brand: p.brand || '',
+        price,
+        rating: p.reviewRating || p.rating || 0,
+        feedbacks: p.feedbacks || 0,
+        url: `https://www.wildberries.ru/catalog/${p.id}/detail.aspx`,
+        marketType: 'local_wb_market',
+        source: 'image',
+        queryHits: [{ query: 'image_search', queryType: 'image' }],
+        sourceHits: [{ query: 'image_search', source: 'image' }],
+        photoRank: index + 1,
+      };
+    }).filter(p => p.id && p.price > 0 && p.title);
+
     return {
       avgPrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length),
       minPrice: Math.min(...prices),
       maxPrice: Math.max(...prices),
       totalCards: products.length,
-      topExamples: products.filter(p => (p.sizes?.[0]?.price?.product || p.salePriceU || p.price)).slice(0, 3).map(p => ({
-        title: p.name || '',
-        price: p.sizes?.[0]?.price?.product ? Math.round(p.sizes[0].price.product / 100) : (p.salePriceU ? Math.round(p.salePriceU / 100) : p.price),
-        url: `https://www.wildberries.ru/catalog/${p.id}/detail.aspx`,
-      })),
+      topExamples: allCards.slice(0, 5).map(p => ({ title: p.title, price: p.price, url: p.url })),
+      allCards,
+      photoSearchConfirmed: true,
     };
   } catch (e) {
     console.error('[wb] Error:', e.message);
