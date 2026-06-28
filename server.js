@@ -45,11 +45,15 @@ function createSession() {
 // ─── Throttle ───────────────────────────────────────────────────────────────
 
 let lastRequestTime = 0;
-const THROTTLE_MS = 1200;
+
+function randomThrottle() {
+  return 700 + Math.floor(Math.random() * 800);
+}
 
 async function throttle() {
   const now = Date.now();
-  const wait = Math.max(0, THROTTLE_MS - (now - lastRequestTime));
+  const delay = randomThrottle();
+  const wait = Math.max(0, delay - (now - lastRequestTime));
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastRequestTime = Date.now();
 }
@@ -166,12 +170,12 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     mode: 'text-only direct',
-    throttle: THROTTLE_MS,
+    throttle: '700-1500ms',
     uptime: process.uptime(),
   });
 });
 
 app.listen(PORT, () => {
   console.log(`WB Parser (text-only, direct) running on port ${PORT}`);
-  console.log(`Throttle: ${THROTTLE_MS}ms`);
+  console.log(`Throttle: 700-1500ms (random)`);
 });
