@@ -1,24 +1,10 @@
 const express = require('express');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SECRET = process.env.SECRET || 'cardzip-wb-2024';
-// Пул резидентных прокси — ротация по портам
-const PROXY_USER = process.env.PROXY_USER || '7fb39cd2e336e19f';
-const PROXY_PASS = process.env.PROXY_PASS || 'xizCBNQAYhVsGaFw';
-const PROXY_HOST = process.env.PROXY_HOST || 'res.geonix.com';
-const PROXY_PORTS = (process.env.PROXY_PORTS || '10010,10011,10012,10013,10014,10015,10016,10017,10018,10019').split(',').map(s => s.trim());
-let proxyIdx = 0;
 
-function getProxyUrl() {
-  if (!PROXY_PORTS.length) return null;
-  const port = PROXY_PORTS[proxyIdx % PROXY_PORTS.length];
-  proxyIdx++;
-  return `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${port}`;
-}
-
-// ─── Chrome-like профили (sticky на сессию) ─────────────────────────────────
+// ─── Chrome-like профили ────────────────────────────────────────────────────
 
 const CHROME_VERSIONS = [
   '136.0.7103.92', '136.0.7103.113', '135.0.7049.84',
@@ -52,7 +38,6 @@ function createSession() {
       'referer': 'https://www.wildberries.ru/',
       'user-agent': `Mozilla/5.0 (${plat.ua}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chrome} Safari/537.36`,
     },
-    proxyUrl: getProxyUrl(),
     createdAt: Date.now(),
   };
 }
@@ -60,7 +45,7 @@ function createSession() {
 // ─── Throttle ───────────────────────────────────────────────────────────────
 
 let lastRequestTime = 0;
-const THROTTLE_MS = PROXY_PORTS.length ? 800 : 1000;
+const THROTTLE_MS = 1200;
 
 async function throttle() {
   const now = Date.now();
@@ -79,7 +64,6 @@ async function fetchWb(query, maxResults, session) {
     headers: session.headers,
     signal: AbortSignal.timeout(10000),
   };
-  if (session.proxyUrl) fetchOpts.agent = new HttpsProxyAgent(session.proxyUrl);
 
   for (let attempt = 0; attempt < 3; attempt++) {
     await throttle();
@@ -87,7 +71,7 @@ async function fetchWb(query, maxResults, session) {
       const response = await fetch(url, fetchOpts);
 
       if (response.status === 429) {
-        const delay = (attempt + 1) * 2000;
+        const delay = (attempt + 1) * 3000;
         console.warn(`[search] 429 rate limit, retry in ${delay}ms`);
         await new Promise(r => setTimeout(r, delay));
         continue;
@@ -102,7 +86,7 @@ async function fetchWb(query, maxResults, session) {
       return (data?.products ?? []).slice(0, maxResults);
     } catch (e) {
       console.warn(`[search] Attempt ${attempt + 1} failed: ${e.message}`);
-      if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
     }
   }
   return [];
@@ -166,7 +150,6 @@ app.post('/search-batch', express.json(), async (req, res) => {
   if (!queries?.length) return res.status(400).json({ error: 'queries required' });
 
   const maxResults = Math.min(parseInt(limit) || 100, 100);
-  // Одна сессия на весь batch (sticky: один IP + один UA)
   const session = createSession();
   const results = [];
 
@@ -182,14 +165,13 @@ app.post('/search-batch', express.json(), async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    mode: 'text-only',
-    proxy: PROXY_PORTS.length ? `${PROXY_PORTS.length} ports` : 'direct',
+    mode: 'text-only direct',
+    throttle: THROTTLE_MS,
     uptime: process.uptime(),
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`WB Parser (text-only) running on port ${PORT}`);
-  console.log(`Proxy: ${PROXY_PORTS.length ? `${PROXY_PORTS.length} ports via ${PROXY_HOST}` : 'NO (direct)'}`);
+  console.log(`WB Parser (text-only, direct) running on port ${PORT}`);
   console.log(`Throttle: ${THROTTLE_MS}ms`);
 });

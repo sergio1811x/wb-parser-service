@@ -7,7 +7,6 @@
     "worker": "node worker.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "https-proxy-agent": "^7.0.6"
+    "express": "^4.21.0"
   }
 }
